@@ -3,9 +3,11 @@ JARVIS — Sesli Komut Asistanı
 Aynı sunucuda, OmniRoute keyless, tarayıcı mikrofonu ile.
 """
 import os
+import io
 import json
 import base64
 import asyncio
+import functools
 import tempfile
 from pathlib import Path
 
@@ -138,39 +140,14 @@ async def ask(audio: UploadFile = File(...)):
     if len(data) < 1000:
         return JSONResponse({"error": "Ses dosyası boş veya çok kısa"}, status_code=400)
 
-    # Tarayici formatini koru (ffmpeg uzantidan okur):
-    # webm/opus, mp4/m4a (Safari), ogg/opus
-    name = audio.filename or "rec.webm"
-    if not name.endswith((".webm", ".m4a", ".mp4", ".ogg", ".opus", ".wav")):
-        name = "rec.webm"
-    tmp_in = AUDIO_TMP / name
-    tmp_in.write_bytes(data)
-
-    # 1) Whisper — once dosyayi 16k mono WAV'a cevir (webm/opus dogrudan okunamayabiliyor)
-    wav = AUDIO_TMP / "in.wav"
-    conv = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", str(tmp_in),
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-        str(wav), "-y",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, cerr = await conv.communicate()
-    if not wav.exists() or wav.stat().st_size < 1000:
-        return JSONResponse(
-            {"error": "Ses dosyasi cozulemedi", "detail": cerr.decode()[-200:]},
-            status_code=422,
-        )
-
-    # Whisper ayni surec icinde modelleri onbellekler (yeniden yuklemek yavas)
-    # CTranslate2 CPU'da bloklar -> thread pool'a at, event loop'a dokunma
-    import functools
-
+    # ffmpeg YOK (Railpack imaji apt-get calistirmiyor). PyAV (av paketi)
+    # webm/opus, mp4/aac, ogg ve wav dosyalarini kendisi okuyup 16k mono float32'ye
+    # cevirir. Bu yuzden ayrica ses donusturme adimi yok.
     segments, _info = await asyncio.get_running_loop().run_in_executor(
         None,
         functools.partial(
-            lambda p: get_whisper().transcribe(
-                p,
+            lambda d: get_whisper().transcribe(
+                d,
                 language="tr",
                 beam_size=5,
                 vad_filter=True,
@@ -184,7 +161,7 @@ async def ask(audio: UploadFile = File(...)):
                 condition_on_previous_text=False,
                 temperature=0.0,
             ),
-            str(wav),
+            io.BytesIO(data),
         ),
     )
     text = " ".join(s.text.strip() for s in segments).strip()
