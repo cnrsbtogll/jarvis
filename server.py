@@ -39,18 +39,25 @@ OMNI_KEY = os.environ.get("OMNIROUTE_KEY", "").strip()  # keyless birakildi
 WHISPER_SIZE = os.environ.get("JARVIS_WHISPER", "base")
 VOICE = os.environ.get("JARVIS_VOZ", "tr-TR-AhmetNeural")
 # Robotik his: yavaşlat + perdeyi düşür
-VOICE_RATE = os.environ.get("JARVIS_RATE", "-15%")
-VOICE_PITCH = os.environ.get("JARVIS_PITCH", "-18Hz")
+VOICE_RATE = os.environ.get("JARVIS_RATE", "+12%")
+VOICE_PITCH = os.environ.get("JARVIS_PITCH", "-12Hz")
 
 SYSTEM_PROMPT = (
     "JARVIS adlı bir yapay zekâsın. Başka bir asistanın kimliğini söyleme, "
     "Kiro / Claude / GPT / Gemini gibi isimleri kendine atfetme.\n\n"
-    "KİMLİK: Adın JARVIS. Kısa tanıtımlar sorulursa adını ve ne yaptığını söyle.\n\n"
-    "DİL: Türkçe konuşursun.\n\n"
-    "BİÇİM: Kısa ve net ol. İki-üç cümleyi geçme. Gereksiz uyarı, "
-    "hukuki uyarı veya 'ben bir dil modeliyim' tarzı açıklamalar verme.\n\n"
-    "ÖNCELİK: Kullanıcının sorusuna doğrudan cevap ver. Kısa ve öz olmak, "
-    "yardımcı olmaktan önce gelir."
+    "KİMLİK: Adın JARVIS.\n\n"
+    "DİL: Türkçe.\n\n"
+    "UZUNLUK — BU EN ÖNEMLİ KURAL: Cevabın EN FAZLA 2 cümle olsun. "
+    "Tek cümle yeterliyse tek cümle yaz. Gereksiz açıklama, tekrarlama, "
+    "giriş cümlesi ve selamlaşma YAZMA. Soruyu cevapla ve dur.\n\n"
+    "ÖRNEK:\n"
+    "Soru: Saat kaç?\n"
+    "Kötü: 'Merhaba! Sisteminiz çalışıyor, sağ olun. Şu an saat 14:30. "
+    "Başka bir sorunuz var mı?'\n"
+    "İyi: 'Saat 14:30.'\n\n"
+    "YASAK: 'size nasıl yardımcı olabilirim', 'başka sorunuz var mı', "
+    "'umarım yardımcı olabilmiş olurum' gibi kalıpları hiç kullanma.\n\n"
+    "Uyarı/hukuki uyarı/lisans metni uydurma."
 )
 
 _model = None
@@ -73,7 +80,7 @@ async def llm(text: str, model: str) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
-        "max_tokens": 220,
+        "max_tokens": 110,
         "temperature": 0.7,
     }
     req = urllib.request.Request(
@@ -94,10 +101,26 @@ async def llm(text: str, model: str) -> str:
 
 
 async def tts(text: str, out: Path) -> bool:
+    """edge-tts ile robotik Turkce ses.
+
+    edge-tts metindeki satir sonlarini ve noktalama bosluklarini uzun
+    sessizlige cevirir ("cümle arasi cok bekliyor" şikayeti bu yuzden).
+    Metni normalize edip tek paragraf haline getiriyoruz.
+    """
     import edge_tts
+    import re
+
+    # Satir sonlarini kaldir, fazla bosluklari daralt
+    clean = re.sub(r"\s*\n\s*", " ", text)
+    clean = re.sub(r"\s{2,}", " ", clean).strip()
+    # Noktalama sonrasi fazla bosluk (edge-tts bunu uzatir)
+    clean = re.sub(r"([.!?:;])\s+", r"\1 ", clean)
+    # Uzun tirnak iceren yapilari kirp (WhatsApp/paket metni varsa)
+    if len(clean) > 400:
+        clean = clean[:400].rsplit(" ", 1)[0] + "."
 
     try:
-        c = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH)
+        c = edge_tts.Communicate(clean, VOICE, rate=VOICE_RATE, pitch=VOICE_PITCH)
         await c.save(str(out))
         return out.exists() and out.stat().st_size > 1000
     except Exception:
