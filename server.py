@@ -13,9 +13,11 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-BASE = Path("/opt/data/jarvis")
+# Klasör yolu: Docker imajinda /app, yerel calistirmada /opt/data/jarvis
+BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 STATIC.mkdir(exist_ok=True)
+AUDIO_TMP = Path(tempfile.gettempdir()) / "jarvis"
 
 # ── Yapılandırma ───────────────────────────────────────────────
 # OmniRoute adresi: konteyner ici ya da dis servis adi
@@ -126,8 +128,9 @@ async def health():
 @app.post("/api/ask")
 async def ask(audio: UploadFile = File(...)):
     """Ses al → Whisper ile metne çevir → LLM → TTS → sesli cevap."""
-    tmp_in = Path(tempfile.gettempdir()) / f"jarvis_in_{audio.filename or 'x'}.webm"
-    tmp_out = Path(tempfile.gettempdir()) / "jarvis_out.mp3"
+    AUDIO_TMP.mkdir(parents=True, exist_ok=True)
+    tmp_in = AUDIO_TMP / f"in_{audio.filename or 'rec.webm'}"
+    tmp_out = AUDIO_TMP / "out.mp3"
 
     data = await audio.read()
     if len(data) < 1000:
@@ -135,9 +138,7 @@ async def ask(audio: UploadFile = File(...)):
     tmp_in.write_bytes(data)
 
     # 1) Whisper — once dosyayi 16k mono WAV'a cevir (webm/opus dogrudan okunamayabiliyor)
-    import subprocess
-
-    wav = Path(tempfile.gettempdir()) / "jarvis_in.wav"
+    wav = AUDIO_TMP / "in.wav"
     conv = await asyncio.create_subprocess_exec(
         "ffmpeg", "-i", str(tmp_in),
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
@@ -152,24 +153,28 @@ async def ask(audio: UploadFile = File(...)):
             status_code=422,
         )
 
-    transcribe_script = BASE / "stt.py"
-    proc = await asyncio.create_subprocess_exec(
-        str(BASE / ".venv/bin/python"),
-        str(transcribe_script),
-        str(wav),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    # Whisper ayni surec icinde modelleri onbellekler (yeniden yuklemek yavas)
+    # CTranslate2 CPU'da bloklar -> thread pool'a at, event loop'a dokunma
+    import functools
+
+    segments, _info = await asyncio.get_running_loop().run_in_executor(
+        None,
+        functools.partial(
+            lambda p: get_whisper().transcribe(
+                p,
+                language="tr",
+                beam_size=1,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 400},
+                condition_on_previous_text=False,
+            ),
+            str(wav),
+        ),
     )
-    so, se = await proc.communicate()
-    try:
-        text = so.decode().strip()
-    except Exception:
-        text = ""
+    text = " ".join(s.text.strip() for s in segments).strip()
 
     if not text:
-        return JSONResponse(
-            {"error": "Konuşma anlaşılamadı", "detail": se.decode()[:200]}, status_code=422
-        )
+        return JSONResponse({"error": "Konuşma anlaşılamadı"}, status_code=422)
 
     # 2) LLM — keyless, önce nvd, düşerse sonnet-kiro-combo
     reply = await llm(text, MODEL)

@@ -3,3 +3,7 @@ uvicorn[standard]
 faster-whisper
 edge-tts
 python-multipart
+
+# faster-whisper 1.2.1 decode_audio() -> av.open(..., metadata_errors="ignore")
+# PyAV 14+ bu parametreyi kaldirdi. 13.x ile sabitlendi.
+av<14
