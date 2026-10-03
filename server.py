@@ -20,11 +20,14 @@ STATIC.mkdir(exist_ok=True)
 AUDIO_TMP = Path(tempfile.gettempdir()) / "jarvis"
 
 # ── Yapılandırma ───────────────────────────────────────────────
-# OmniRoute adresi: konteyner ici ya da dis servis adi
-# Yeni konteynerde localhost calismaz -> dis adres kullanilir
+# OmniRoute adresi.
+# DIKKAT: :20128 eklenmemeli — o port Coolify proxy'de disariya acik degil
+# (connection refused). Ana public link (443/https) keyless calisiyor:
+#   /v1/models            -> 401 (beklenen, keyless)
+#   /v1/chat/completions  -> 200 keyless
 OMNI = os.environ.get(
     "OMNIROUTE_URL",
-    "https://omniroute-2k4af0eejkosuo8ackzm0fik.cnrsbtogll.store:20128/v1",
+    "https://omniroute-2k4af0eejkosuo8ackzm0fik.cnrsbtogll.store/v1",
 )
 # Calisan combo'lar: nvd (1.8s) | sonnet-kiro-combo (2.0s)
 # static-* combo'lari su an "Maximum combo retry limit" veriyor.

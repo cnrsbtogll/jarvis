@@ -15,7 +15,7 @@ COPY static/ ./static/
 
 ENV JARVIS_MODEL=sonnet-kiro-combo \
     JARVIS_FALLBACK=nvd \
-    OMNIROUTE_URL=https://omniroute-2k4af0eejkosuo8ackzm0fik.cnrsbtogll.store:20128/v1 \
+    OMNIROUTE_URL=https://omniroute-2k4af0eejkosuo8ackzm0fik.cnrsbtogll.store/v1 \
     JARVIS_WHISPER=base \
     JARVIS_VOZ=tr-TR-AhmetNeural \
     JARVIS_RATE=-15% \
