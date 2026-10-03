@@ -255,11 +255,13 @@ async function toggleRec(){
     recStream=s;recChunks=[];
     media.ondataavailable=e=>{if(e.data&&e.data.size>0)recChunks.push(e.data)};
     media.onerror=e=>add('KAYIT HATASI: '+(e.error||e.type||'bilinmiyor'),'sys');
-    media.start();
+    // timeslice ver: parametresiz start() ilk chunk'i geciktirip
+    // kisa konusmalarda sessiz kayda yol aciyor
+    media.start(250);
     $('rec').classList.add('on');
     setState('listening');status.textContent='DİNLEME — KONUŞ';
-    // 10 sn sonra otomatik dur
-    recTimer=setTimeout(()=>{if(recStream)stopRec()},10000);
+    // 45 sn: kullanici dusunce zamanlayabilsin. once tekrar basip bitirir.
+    recTimer=setTimeout(()=>{if(recStream)stopRec()},45000);
   }catch(e){
     console.error('mic error:',e);
     add('MİKROFON HATASI: '+e.message,'sys');
@@ -277,7 +279,11 @@ async function stopRec(){
     $('rec').classList.remove('on');
     const type=(recorder&&recorder.mimeType)||'audio/webm';
     const blob=new Blob(chunks,{type});
-    if(blob.size<1500){setState(null);add('SES YAKALANAMADI ('+chunks.length+' parça, '+blob.size+' bayt)','sys');return}
+    // Teşhis: kayıt boyutunu ve sureyi ekrana yaz. Sorun teshisinde
+    // ilk bakista buraya bakilir.
+    const secs=(chunks.reduce((a,c)=>a+c.size,0)/16000).toFixed(1);
+    add('⏺ '+blob.size+' bayt · '+secs+' sn · '+type,'sys');
+    if(blob.size<1500){setState(null);add('SES YAKALANAMADI — mikrofon sesi almıyor. Farklı mikrofon dene veya sistem izinlerini kontrol et.','sys');return}
     setState('thinking');status.textContent='ANALİZ';
     const fd=new FormData();
     fd.append('audio',blob,'rec'+(blob.type.includes('mp4')?'.m4a':blob.type.includes('ogg')?'.ogg':'.webm'));

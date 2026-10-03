@@ -172,10 +172,17 @@ async def ask(audio: UploadFile = File(...)):
             lambda p: get_whisper().transcribe(
                 p,
                 language="tr",
-                beam_size=1,
+                beam_size=5,
                 vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 400},
+                # Kisa Turkce cumleler VAD tarafindan kirpilmasin diye
+                # esik dusuruldu ve sessizlik toleransi artirildi
+                vad_parameters={
+                    "min_silence_duration_ms": 200,
+                    "speech_pad_ms": 400,
+                    "threshold": 0.2,
+                },
                 condition_on_previous_text=False,
+                temperature=0.0,
             ),
             str(wav),
         ),
