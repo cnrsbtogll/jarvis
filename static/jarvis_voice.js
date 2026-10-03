@@ -1,270 +1,296 @@
 // ══════════════════════════════════════════════════════════════
-// KARŞILIKLI KONUŞMA: Uyandırma + odaklı dinleme
+// JARVIS — Karşılıklı konuşma
+//
+// MİMARİ: Ses algılama (VAD) tamamen tarayıcıda. Sunucuya her
+// 1.5 sn ses göndermek yerine, kullanıcı konuşup SUSTUĞUNDA
+// tek seferde gönderilir. Önceki tasarımda sunucu Whisper'ı
+// takip edemiyor, döngü tıkandığı için uyanma kelimesi hiç
+// işlenmiyordu.
 //
 // Akış:
-//   1. Sürekli dinle (her zaman açık mikrofon)
-//   2. "Jarvis" duyuldu -> ANINDA komut moduna geç (kelime kaydı at)
-//   3. Komut modunda konuşma bitene kadar dinle (VAD ile sessizlik algıla)
-//   4. Sessizlik 1.2 sn sürdü -> Whisper + LLM + cevap
-//   5. Cevabı sesli ver, sonra tekrar uyanma moduna dön
+//   sayfa açılınca otomatik dinleme başlar (buton gerekmez)
+//   konuşma algılanır -> yerel tampon birikir
+//   1.1 sn sessizlik -> konuşma bitti
+//   tek istekte sunucuya gönderilir (WAV)
+//   sunucu metni çıkarır, "jarvis" kontrolü yapar
+//     ├─ "Jarvis" + komut varsa  -> cevap ver
+//     ├─ sadece "Jarvis"        -> dinliyorum modu
+//     └─ kelime yoksa          -> yok say
 //
-// Kritik: uyandırma kelimesi kaydın KENDİSİNDEN ayrılır, yoksa
-// "Jarvis saat kaç" dediğinde komut kısmen kaybolur.
+// Konuşma sırasında araya girme (barge-in) desteklenir.
 // ══════════════════════════════════════════════════════════════
 
-const WAKE_WORDS = [
-  'jarvis', 'jarvez', 'yarvis', 'jarvıs', 'charvis', 'carvis',
-  'jervis', 'jarvis', 'jaruis', 'jarviss', 'jarves'
-];
-// Whisper bazen "jarvis"i böyle yazıyor; kelime bazlı eşleşme + tolerans
-const WAKE_RE = new RegExp(
-  '\\b(' + WAKE_WORDS.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')\\b',
-  'i'
-);
-
-let wake = {
-  on: false,
-  stream: null,
-  rec: null,
-  analyser: null,
-  ctx: null,          // AudioContext (sessizlik ölçümü için)
-  chunks: [],
-  phase: 'idle',      // idle | wakewait | command | replying
-  sliceTimer: null,
-  silenceTimer: null,
-  maxTimer: null,
-  cmdText: '',        // uyanma anından beri biriken metin
-  speaking: false     // JARVIS konuşuyorken mikrofonu kapat (yankı)
+const V = {
+  ctx: null, stream: null, src: null, node: null,
+  sampleRate: 48000,
+  chunks: [],        // {start, data} — ring buffer
+  written: 0,        // toplam yazılan örnek sayısı
+  maxSamples: 48000 * 40,
+  speaking: false,   // kullanıcı konuşuyor mu
+  utterStart: 0,     // utterance başlangıç örnek indeksi
+  lastVoiceAt: 0,
+  enabled: false,
+  busy: false,
+  jarvisSpeaking: false
 };
 
-const SILENCE_MS = 1200;      // bu kadar sessizlik = konuşma bitti
-const WAKE_SLICE_MS = 1500;    // uyanma kelimesi arama dilimi
-const CMD_MAX_MS = 15000;      // komut için maksimum süre
-const VOICE_FLOOR = 0.012;     // bu RMS altı = sessizlik
+// Ayarlar
+const VAD = {
+  threshold: 0.013,     // RMS eşiği — bunun üstü = ses
+  hangoverMs: 1100,     // bu kadar sessizlik = konuşma bitti
+  preRollMs: 350,       // konuşma başından önceki tampon
+  tailMs: 250,          // konuşma sonrası tampon
+  minUtterMs: 320,      // bu kadar kısaysa gürültü say
+  maxUtterMs: 14000
+};
 
-// ── SES SEVİYESİ ÖLÇÜMÜ ───────────────────────────────────────
-function rmsLevel(){
-  if (!wake.analyser) return 0;
-  const buf = new Float32Array(wake.analyser.fftSize);
-  wake.analyser.getFloatTimeDomainData(buf);
-  let sum = 0;
-  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-  return Math.sqrt(sum / buf.length);
-}
-
-function clearTimers(){
-  clearTimeout(wake.sliceTimer);
-  clearTimeout(wake.silenceTimer);
-  clearTimeout(wake.maxTimer);
-  wake.sliceTimer = wake.silenceTimer = wake.maxTimer = null;
-}
-
-// ── KOMUT MODUNDAN UYANMA MODUNA DÖNÜŞ ─────────────────────────
-function sleepPhase(){
-  if (!wake.on) return;
-  clearTimers();
-  wake.phase = 'wakewait';
-  wake.chunks = [];
-  setState('listening');
-  status.textContent = 'BEKLEMEDE — "JARVIS" DE';
-  startSlice();
-}
-
-// ── UYANMA KELİMESİ ARAMA DÖNGÜSÜ ─────────────────────────────
-function startSlice(){
-  if (!wake.on || wake.phase !== 'wakewait') return;
-  try { wake.rec.start(); } catch(e){}
-
-  wake.sliceTimer = setTimeout(async () => {
-    if (!wake.on || wake.phase !== 'wakewait') return;
-    try { wake.rec.stop(); } catch(e){}
-
-    const blob = new Blob(wake.chunks, { type: wake.rec.mimeType || 'audio/webm' });
-    wake.chunks = [];
-    if (blob.size < 900) { sleepPhase(); return; }
-
-    const fd = new FormData();
-    fd.append('audio', blob, 'wake' + extOf(blob.type));
-
-    try {
-      const r = await fetch('/api/wake', { method:'POST', body: fd });
-      const j = await r.json();
-      if (j.wake) {
-        wake.cmdText = j.text || '';   // uyanma kelimesinin tanındığı metin
-        toCommandMode();
-      } else {
-        sleepPhase();
-      }
-    } catch(e) {
-      sleepPhase();
-    }
-  }, WAKE_SLICE_MS);
-}
-
-function extOf(mime){
-  if (!mime) return '.webm';
-  if (mime.includes('mp4')) return '.m4a';
-  if (mime.includes('ogg')) return '.ogg';
-  return '.webm';
-}
-
-// ── KOMUT MODU: KONUŞMA BİTENE KADAR DİNLE ─────────────────────
-function toCommandMode(){
-  wake.phase = 'command';
-  stopAudio();                 // JARVIS sesini kapat
-  setState('listening');
-  status.textContent = 'DİNLEMEDE — KONUŞ';
-  add('◉ Jarvis duydum. Konuş.','sys');
-
-  // Mikrofonu konuşma anında aç (yarış durumu olmasın)
-  setTimeout(() => {
-    if (!wake.on || wake.phase !== 'command') return;
-    try {
-      wake.rec.start(200);
-      wake.cmdText = '';
-    } catch(e) { sleepPhase(); return; }
-
-    // Sessizlik izleyici: her 200 ms RMS ölç
-    const watch = setInterval(() => {
-      if (!wake.on || wake.phase !== 'command'){ clearInterval(watch); return; }
-      const lvl = rmsLevel();
-      if (lvl < VOICE_FLOOR) {
-        // sessizlik başladı
-        if (!wake.silenceTimer) {
-          wake.silenceTimer = setTimeout(() => {
-            wake.silenceTimer = null;
-            if (wake.phase === 'command') submitCommand();
-          }, SILENCE_MS);
-        }
-      } else if (wake.silenceTimer) {
-        // konuşma devam ediyor, sessizlik sayacını iptal et
-        clearTimeout(wake.silenceTimer);
-        wake.silenceTimer = null;
-      }
-    }, 200);
-
-    // Maksimum süre
-    wake.maxTimer = setTimeout(() => {
-      clearInterval(watch);
-      if (wake.phase === 'command') submitCommand();
-    }, CMD_MAX_MS);
-  }, 300);
-}
-
-async function submitCommand(){
-  if (!wake.on || wake.phase !== 'command') return;
-  wake.phase = 'replying';
-  clearTimers();
-
-  try { wake.rec.stop(); } catch(e){}
-  const blob = new Blob(wake.chunks, { type: wake.rec.mimeType || 'audio/webm' });
-  wake.chunks = [];
-  await sleep(250);            // son chunk'ın gelmesi için
-
-  if (blob.size < 1500){
-    add('Ses gelmedi.','sys');
-    sleepPhase();
-    return;
+// ── RING BUFFER ────────────────────────────────────────────────
+function pushSamples(data){
+  V.chunks.push({ start: V.written, data });
+  V.written += data.length;
+  // eski parçaları at
+  const limit = V.written - V.maxSamples;
+  while (V.chunks.length && V.chunks[0].start + V.chunks[0].data.length < limit){
+    V.chunks.shift();
   }
+}
 
-  const secs = (blob.size / 16000).toFixed(1);
-  add('⏺ ' + blob.size + ' bayt · ' + secs + ' sn','sys');
+// [a,b) aralığını Float32Array olarak oku
+function readRange(a, b){
+  a = Math.max(0, a); b = Math.min(V.written, b);
+  const out = new Float32Array(Math.max(0, b - a));
+  let p = 0;
+  for (const c of V.chunks){
+    const cs = c.start, ce = c.start + c.data.length;
+    if (ce <= a || cs >= b) continue;
+    const from = Math.max(a, cs) - cs;
+    const to   = Math.min(b, ce) - cs;
+    out.set(c.data.subarray(from, to), p);
+    p += to - from;
+  }
+  return out;
+}
 
+// ── WAV ENCODER (tarayıcı->sunucu, 16k mono 16-bit) ────────────
+function downsample(s, from, to){
+  if (from === to) return s;
+  const ratio = from / to;
+  const n = Math.max(1, Math.floor(s.length / ratio));
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const pos = i * ratio;
+    const i0 = pos | 0;
+    const i1 = Math.min(i0 + 1, s.length - 1);
+    const f = pos - i0;
+    out[i] = s[i0] * (1 - f) + s[i1] * f;
+  }
+  return out;
+}
+
+function encodeWAV(samples, rate){
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
+  str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  let o = 44;
+  for (let i = 0; i < n; i++, o += 2){
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function rmsOf(data){
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+  return Math.sqrt(sum / data.length);
+}
+
+// ── KONUŞMA TAMAMLANDI: SUNUCUYA GÖNDER ───────────────────────
+async function finalizeUtterance(endSample){
+  const startSample = V.utterStart;
+  V.speaking = false;
+  const durMs = (endSample - startSample) / V.sampleRate * 1000;
+
+  if (durMs < VAD.minUtterMs){ idleState(); return; }
+
+  const pcm = readRange(startSample, endSample);
+  const pcm16 = downsample(pcm, V.sampleRate, 16000);
+  const wav = encodeWAV(pcm16, 16000);
+
+  if (V.busy){ idleState(); return; }
+  V.busy = true;
   setState('thinking');
   status.textContent = 'ANALİZ';
 
-  const fd = new FormData();
-  fd.append('audio', blob, 'cmd' + extOf(blob.type));
   try {
-    const r = await fetch('/api/ask', { method:'POST', body: fd });
+    const fd = new FormData();
+    fd.append('audio', wav, 'utt.wav');
+    const r = await fetch('/api/speak', { method:'POST', body: fd });
     const j = await r.json();
-    if (j.error){
-      add('Hata: ' + j.error,'sys');
-      sleepPhase();
-      return;
-    }
-    add(j.text,'you');
-    const b = document.createElement('div');
-    b.className = 'msg jar';
-    b.textContent = j.reply;
-    log.appendChild(b);
-    log.scrollTop = log.scrollHeight;
 
-    // Cevabı sesli ver, bitince uyanma moduna dön
-    wake.speaking = true;
-    speakReply(j.reply, j.audio);
-    const back = setInterval(() => {
-      if (!wake.on || wake.phase !== 'replying'){ clearInterval(back); return; }
-      if (!isPlaying()){
-        clearInterval(back);
-        wake.speaking = false;
-        sleepPhase();
+    if (j.error){
+      add('Hata: ' + j.error, 'sys');
+    } else if (j.wake){
+      if (j.text) add(j.text, 'you');
+      if (j.reply){
+        const b = document.createElement('div');
+        b.className = 'msg jar';
+        b.textContent = j.reply;
+        log.appendChild(b); log.scrollTop = log.scrollHeight;
+        speakAndResume(j.reply, j.audio);
+        V.busy = false;
+        return;
+      } else {
+        // sadece "Jarvis" dendi -> dinliyorum
+        setState('listening');
+        status.textContent = 'DİNLEMEDE — KONUŞ';
+        add('◉ Jarvis duydum. Konuş.','sys');
+        V.busy = false;
+        idleState(1200);
+        return;
       }
-    }, 300);
-    // güvenlik: 25 sn sonra zorla dön
-    setTimeout(() => {
-      clearInterval(back);
-      wake.speaking = false;
-      if (wake.phase === 'replying') sleepPhase();
-    }, 25000);
-  } catch(e) {
-    add('Bağlantı hatası.','sys');
-    sleepPhase();
+    }
+    // uyanma kelimesi yok -> yok say
+  } catch(e){
+    add('Bağlantı hatası','sys');
   }
+  V.busy = false;
+  idleState();
+}
+
+// Cevabı sesli ver, bitince dinlemeye devam
+function speakAndResume(txt, b64){
+  V.jarvisSpeaking = true;
+  stopAudio();
+  if (b64) playB64(b64); else speak(txt);
+
+  const watch = setInterval(() => {
+    if (!isPlaying()){
+      clearInterval(watch);
+      V.jarvisSpeaking = false;
+      idleState();
+    }
+  }, 250);
+  setTimeout(() => {
+    clearInterval(watch);
+    V.jarvisSpeaking = false;
+    idleState();
+  }, 20000);
+}
+
+function idleState(delay = 250){
+  if (!V.enabled) return;
+  clearTimeout(idleState._t);
+  idleState._t = setTimeout(() => {
+    if (!V.enabled || V.busy) return;
+    setState('listening');
+    status.textContent = 'BEKLEMEDE — "JARVIS" DE';
+  }, delay);
+}
+
+// ── VAD DÖNGÜSÜ ───────────────────────────────────────────────
+function onAudio(data){
+  if (!V.enabled) return;
+  const now = performance.now();
+  const level = rmsOf(data);
+
+  // JARVIS konuşurken: araya girme kontrolü (echoCancellation çoğunu eler)
+  const barge = V.jarvisSpeaking && level > VAD.threshold * 2.5;
+
+  if (level > VAD.threshold || barge){
+    if (!V.speaking){
+      V.speaking = true;
+      V.utterStart = Math.max(0, V.written - Math.floor(VAD.preRollMs * V.sampleRate / 1000));
+      if (barge){ stopAudio(); V.jarvisSpeaking = false; }
+      setState('listening');
+      status.textContent = 'DİNLEMEDE — KONUŞ';
+    }
+    V.lastVoiceAt = now;
+  } else if (V.speaking && now - V.lastVoiceAt > VAD.hangoverMs){
+    const end = V.written - Math.floor(VAD.tailMs * V.sampleRate / 1000);
+    finalizeUtterance(end);
+  }
+
+  // utterance çok uzadıysa kes
+  if (V.speaking && (V.written - V.utterStart) / V.sampleRate * 1000 > VAD.maxUtterMs){
+    finalizeUtterance(V.written);
+  }
+
+  pushSamples(data);
+}
+
+// ── MİKROFON AÇ ───────────────────────────────────────────────
+async function startVoice(){
+  if (V.enabled) return;
+  try {
+    V.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1
+      }
+    });
+  } catch(e){
+    $('wake').style.color = '#ff3b5c';
+    add('Mikrofon izni verilmedi: ' + e.message + ' — JARVIS düğmesine bas ve izin ver.','sys');
+    return;
+  }
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  V.ctx = new AC();
+  if (V.ctx.state === 'suspended') await V.ctx.resume();
+  V.sampleRate = V.ctx.sampleRate;
+
+  V.src = V.ctx.createMediaStreamSource(V.stream);
+
+  // ScriptProcessor: her yerde çalışır, bu iş için yeterli
+  const size = 2048;
+  V.node = V.ctx.createScriptProcessor(size, 1, 1);
+  V.node.onaudioprocess = e => {
+    // kanal verisini kopyala (mic her zaman mono)
+    onAudio(new Float32Array(e.inputBuffer.getChannelData(0)));
+  };
+  V.src.connect(V.node);
+  // gain 0: işlenmiş sesi hoparlöre gönderme (yankı)
+  const mute = V.ctx.createGain();
+  mute.gain.value = 0;
+  V.node.connect(mute);
+  mute.connect(V.ctx.destination);
+
+  V.enabled = true;
+  V.chunks = []; V.written = 0; V.speaking = false;
+  $('wake').style.background = 'rgba(0,255,157,.15)';
+  $('wake').style.borderColor = '#00ff9d';
+  $('wake').style.color = '#00ff9d';
+  $('rec').classList.add('on');
+  add('◉ Dinliyorum. "Jarvis" de, sonra konuş — sustuğunda cevap veririm.','sys');
+  idleState(100);
+}
+
+function stopVoice(){
+  V.enabled = false;
+  if (V.node){ try { V.node.disconnect(); } catch(e){} V.node = null; }
+  if (V.src){ try { V.src.disconnect(); } catch(e){} V.src = null; }
+  if (V.stream){ V.stream.getTracks().forEach(t => t.stop()); V.stream = null; }
+  if (V.ctx){ try { V.ctx.close(); } catch(e){} V.ctx = null; }
+  V.chunks = []; V.written = 0; V.speaking = false; V.jarvisSpeaking = false;
+  $('wake').style.background = '';
+  $('wake').style.borderColor = '';
+  $('wake').style.color = '';
+  $('rec').classList.remove('on');
+  setState(null);
+  add('⏸ Dinleme kapatıldı','sys');
 }
 
 function isPlaying(){
   if (currentAudio && !currentAudio.paused && !currentAudio.ended) return true;
   if ('speechSynthesis' in window && speechSynthesis.speaking) return true;
   return false;
-}
-
-// ── AÇ / KAPA ─────────────────────────────────────────────────
-async function startWakeMode(){
-  if (wake.on) return;
-  if (recStream){ add('Önce bas-konuş kaydını bitir.','sys'); return; }
-
-  try {
-    wake.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
-    });
-  } catch(e){
-    add('Mikrofon hatası: ' + e.message,'sys');
-    return;
-  }
-
-  // AudioContext: RMS ölçümü için (ayrı bir kayıt yapmaz, stream'i paylaşır)
-  try {
-    wake.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const src = wake.ctx.createMediaStreamSource(wake.stream);
-    wake.analyser = wake.ctx.createAnalyser();
-    wake.analyser.fftSize = 2048;
-    src.connect(wake.analyser);
-  } catch(e){}
-
-  const Recorder = window.MediaRecorder || window.webkitMediaRecorder;
-  const mime = ['audio/webm;codecs=opus','audio/webm','audio/mp4']
-    .find(t => Recorder.isTypeSupported && Recorder.isTypeSupported(t));
-  wake.rec = mime ? new Recorder(wake.stream, { mimeType: mime }) : new Recorder(wake.stream);
-
-  wake.rec.ondataavailable = e => { if (e.data && e.data.size > 0) wake.chunks.push(e.data); };
-  wake.on = true;
-  $('rec').classList.add('on');
-  $('wake').style.background = 'rgba(255,176,0,.2)';
-  add('🎤 Uyandırma modu — "Jarvis" de. Sonra konuş, susunca cevap veririm.','sys');
-  sleepPhase();
-}
-
-function stopWakeMode(){
-  wake.on = false;
-  wake.phase = 'idle';
-  clearTimers();
-  stopAudio();
-  if (wake.rec){ try { if (wake.rec.state !== 'inactive') wake.rec.stop(); } catch(e){} }
-  if (wake.stream){ wake.stream.getTracks().forEach(t => t.stop()); wake.stream = null; }
-  if (wake.ctx){ try { wake.ctx.close(); } catch(e){} wake.ctx = null; wake.analyser = null; }
-  $('rec').classList.remove('on');
-  $('wake').style.background = '';
-  setState(null);
-  add('⏸ Uyandırma modu kapatıldı','sys');
 }

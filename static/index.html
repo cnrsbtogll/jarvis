@@ -259,7 +259,7 @@ async function toggleRec(){
   if(recStream){stopRec();return}
   // Uyandirma modu jarvis_voice.js tarafindan yonetiliyor.
   // Bas-konus burada; wake modu JARVIS butonunda.
-  if(wake.on){stopWakeMode();return}
+  if(V.enabled){stopVoice();return}
   try{
     // ONCE mikrofon akisini al, SONRA MediaRecorder kur.
     // MediaRecorder() stream'siz kurulunca InvalidStateError verir ve
@@ -335,8 +335,8 @@ $('rec').onclick=toggleRec;
 
 // Uyandirma modunu ayri bir dugmeyle ac (mikrofon surekli acik kalir)
 $('wake').onclick=()=>{
-  if(wakeMode){stopWakeMode();return}
-  startWakeMode();
+  if(V.enabled){stopVoice();return}
+  startVoice();
 };
 
 // sag tik ile mod degistir
@@ -348,6 +348,20 @@ $('log').addEventListener('click',e=>{
 });
 
 // health
+// Sayfa acilinca otomatik dinleme. Mikrofon izni daha once verildiyse
+// hicbir butona basmadan calisir; degilse JARVIS butonu tek kere tiklanir.
+setTimeout(()=>{
+  if(typeof startVoice==='function'){
+    try{
+      navigator.mediaDevices.permissions
+        ? navigator.mediaDevices.permissions.query({name:'microphone'})
+            .then(s=>{ if(s.state==='granted') startVoice(); })
+            .catch(()=>{})
+        : startVoice();
+    }catch(e){}
+  }
+},600);
+
 fetch('/api/health').then(r=>r.json()).then(j=>{
   $('m1').textContent='MODEL '+j.model;
   status.textContent='SİSTEM HAZIR';

@@ -63,6 +63,53 @@ SYSTEM_PROMPT = (
 _model = None
 
 
+# Whisper'in "jarvis" icin yazdigi varyantlar.
+# Turkce telaffuzda "Jarvis" -> "Şarif"/"Sallis"/"Carvis" olarak duyuluyor,
+# edge-tts ile uretilen ses icin olcum yapildi: "Jarvis salsa" -> "Şarif salsa".
+WAKE_VARIANTS = (
+    # Turkce yorumlari: "Jarvis" Turkce telaffuzda "Saris" olarak duyuluyor
+    # (edge-tts ile uretilen ses icin olcum: "Jarvis salsa" -> "Saris salsa")
+    "şarif", "sarih", "sarif", "sariş", "sarıf", "saris", "salis",
+    "salih", "carif", "sarrif",
+    # Latin yorumlari
+    "jarvis", "jarvez", "yarvis", "jarvıs", "charvis", "carvis",
+    "jervis", "jaruis", "jarviss", "jarves", "yarvez",
+)
+
+
+async def _transcribe(data: bytes) -> str:
+    """Ses baytlarini Turkce metne cevirir (PyAV okur, ffmpeg gerekmez)."""
+    segments, _info = await asyncio.get_running_loop().run_in_executor(
+        None,
+        functools.partial(
+            lambda d: get_whisper().transcribe(
+                d,
+                language="tr",
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters={
+                    "min_silence_duration_ms": 200,
+                    "speech_pad_ms": 400,
+                    "threshold": 0.2,
+                },
+                condition_on_previous_text=False,
+                temperature=0.0,
+            ),
+            io.BytesIO(data),
+        ),
+    )
+    return " ".join(s.text.strip() for s in segments).strip()
+
+
+def _strip_wake(low: str) -> str:
+    """Uyandirma kelimesini metinden cikarir, kalani komut olarak dondurur."""
+    out = low
+    for k in WAKE_VARIANTS:
+        out = out.replace(k, " ")
+    # tek harf / gurultu artiklarini at
+    return " ".join(w for w in out.split() if any(c.isalpha() for c in w)).strip()
+
+
 def get_whisper():
     global _model
     if _model is None:
@@ -153,37 +200,61 @@ async def health():
     }
 
 
+@app.post("/api/speak")
+async def speak(audio: UploadFile = File(...)):
+    """Tek istek: sesi çöz → uyanma kelimesi var mı → varsa cevap üret.
+
+    Tarayıcı VAD ile sessizliği algılayıp sadece konuşma bitince
+    gönderiyor. Eski tasarımda her 1.5 sn gönderiliyordu; sunucu
+    Whisper'ı takip edemiyor, döngü tıkandığı için uyanma kelimesi
+    hiç işlenmiyordu.
+    """
+    data = await audio.read()
+    if len(data) < 2000:
+        return {"error": "Ses çok kısa"}
+
+    text = await _transcribe(data)
+    if not text:
+        return {"error": "Konuşma anlaşılamadı"}
+
+    low = text.lower()
+    hit = any(k in low for k in WAKE_VARIANTS)
+    if not hit:
+        # Uyandırma kelimesi yok — kullanıcı kendi kendine konuşuyor
+        return {"wake": False, "text": text}
+
+    # Sadece "Jarvis" mi, yoksa komut da var mı?
+    cleaned = _strip_wake(low)
+    if len(cleaned) < 3:
+        return {"wake": True, "text": text, "reply": ""}
+
+    reply = await llm(cleaned, MODEL)
+    if reply.startswith("Hata:"):
+        reply = await llm(cleaned, FALLBACK_MODEL)
+
+    AUDIO_TMP.mkdir(parents=True, exist_ok=True)
+    out = AUDIO_TMP / "out.mp3"
+    ok = await tts(reply, out)
+    b64 = base64.b64encode(out.read_bytes()).decode() if ok else ""
+
+    return {
+        "wake": True,
+        "text": text,
+        "command": cleaned,
+        "reply": reply,
+        "audio": b64,
+        "audio_mime": "audio/mpeg" if ok else "",
+    }
+
+
 @app.post("/api/wake")
 async def wake(audio: UploadFile = File(...)):
-    """Uyandırma kelimesi kontrolü — komutu çözümlemek için pahalı model kullanma."""
+    """Uyandırma kelimesi kontrolü (yedek endpoint — /api/speak varsayılan)."""
     data = await audio.read()
     if len(data) < 500:
         return {"wake": False, "text": ""}
-
-    segments, _info = await asyncio.get_running_loop().run_in_executor(
-        None,
-        functools.partial(
-            lambda d: get_whisper().transcribe(
-                d,
-                language="tr",
-                beam_size=1,
-                vad_filter=True,
-                vad_parameters={"threshold": 0.2, "min_silence_duration_ms": 200},
-                condition_on_previous_text=False,
-                temperature=0.0,
-            ),
-            io.BytesIO(data),
-        ),
-    )
-    text = " ".join(s.text.strip() for s in segments).strip().lower()
-
-    # Whisper "jarvis"i "yarvis"/"carvis"/"jarvis" gibi yazabiliyor.
-    # Bu yuzden_once kabuk harfi eslesmesi, sonra normalize harf eslesmesi.
-    hit = any(
-        k in text
-        for k in ("jarvis", "yarvis", "jarves", "jarwitz", "jarwıs", "charvis", "carvis", "javıs")
-    )
-    return {"wake": hit, "text": text}
+    text = (await _transcribe(data)).lower()
+    return {"wake": any(k in text for k in WAKE_VARIANTS), "text": text}
 
 
 @app.post("/api/ask")
@@ -196,31 +267,7 @@ async def ask(audio: UploadFile = File(...)):
     if len(data) < 1000:
         return JSONResponse({"error": "Ses dosyası boş veya çok kısa"}, status_code=400)
 
-    # ffmpeg YOK (Railpack imaji apt-get calistirmiyor). PyAV (av paketi)
-    # webm/opus, mp4/aac, ogg ve wav dosyalarini kendisi okuyup 16k mono float32'ye
-    # cevirir. Bu yuzden ayrica ses donusturme adimi yok.
-    segments, _info = await asyncio.get_running_loop().run_in_executor(
-        None,
-        functools.partial(
-            lambda d: get_whisper().transcribe(
-                d,
-                language="tr",
-                beam_size=5,
-                vad_filter=True,
-                # Kisa Turkce cumleler VAD tarafindan kirpilmasin diye
-                # esik dusuruldu ve sessizlik toleransi artirildi
-                vad_parameters={
-                    "min_silence_duration_ms": 200,
-                    "speech_pad_ms": 400,
-                    "threshold": 0.2,
-                },
-                condition_on_previous_text=False,
-                temperature=0.0,
-            ),
-            io.BytesIO(data),
-        ),
-    )
-    text = " ".join(s.text.strip() for s in segments).strip()
+    text = await _transcribe(data)
 
     if not text:
         return JSONResponse({"error": "Konuşma anlaşılamadı"}, status_code=422)
