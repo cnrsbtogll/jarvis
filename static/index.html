@@ -254,124 +254,12 @@ async function ask(text){
 $('send').onclick=()=>ask($('q').value);
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')ask($('q').value)});
 
-// ── WAKE WORD: "JARVIS" DEYİNCE DİNLE ──────────────────────────
-// Sürekli dinleme modu. Mikrofon her zaman açık, ses sadece
-// "jarvis" kelimesi duyulduğunda kaydedilir.
-const WAKE=/\bjarvis\b|yarvis|jarves|jarwitz|jarvis\b/i;
-let wakeStream=null,wakeRec=null,wakeChunks=[];
-let wakeMode=false,        // sürekli mod açık mı
-    wakeListening=false,   // şu an kelime bekleniyor mu
-    wakeActive=false,      // kelime duyuldu, komut dinleniyor
-    wakeTimer=null,wakeCmdTimer=null;
-
-async function startWakeMode(){
-  if(wakeMode||recStream)return;
-  try{
-    wakeStream=await navigator.mediaDevices.getUserMedia({
-      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
-    });
-  }catch(e){
-    add('MİKROFON HATASI: '+e.message,'sys');return;
-  }
-
-  const Recorder=window.MediaRecorder||window.webkitMediaRecorder;
-  const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4']
-    .find(t=>Recorder.isTypeSupported&&Recorder.isTypeSupported(t));
-  wakeRec=mime?new Recorder(wakeStream,{mimeType:mime}):new Recorder(wakeStream);
-
-  wakeMode=true;
-  add('🎤 UYANDIRMA MODU — "Jarvis" de, karşılık bekle','sys');
-  $('rec').classList.add('on');
-  wakeListen();
-}
-
-// 2 saniyelik dilimlerle dinle, "jarvis" ara
-function wakeListen(){
-  if(!wakeMode)return;
-  wakeChunks=[];
-  wakeRec.ondataavailable=e=>{if(e.data&&e.data.size>0)wakeChunks.push(e.data)};
-  wakeRec.onstop=()=>{
-    if(!wakeMode)return;
-    const blob=new Blob(wakeChunks,{type:wakeRec.mimeType||'audio/webm'});
-    if(blob.size<1200){wakeListen();return}
-    const d=new FormData();
-    d.append('audio',blob,'wake'+(blob.type.includes('mp4')?'.m4a':'.webm'));
-    // Whisper'a gonder, kelime var mi bak
-    fetch('/api/wake',{method:'POST',body:d})
-      .then(r=>r.json())
-      .then(j=>{
-        if(j.wake){wakeCommand();return}
-        wakeListen();
-      })
-      .catch(()=>wakeListen());
-  };
-  try{wakeRec.start();}catch(e){}
-  wakeListening=true;
-  wakeTimer=setTimeout(()=>{
-    if(wakeMode&&wakeRec&&wakeRec.state!=='inactive'){try{wakeRec.stop()}catch(e){}}
-  },2000);
-}
-
-// "Jarvis" duyuldu -> komutu dinle
-function wakeCommand(){
-  wakeListening=false;
-  wakeActive=true;
-  stopAudio();
-  setState('listening');
-  status.textContent='DİNLEMEDE — KOMUTUNU SÖYLE';
-  add('◉ Jarvis duydum. Komutunu söyle...','sys');
-
-  wakeChunks=[];
-  wakeRec.ondataavailable=e=>{if(e.data&&e.data.size>0)wakeChunks.push(e.data)};
-  wakeRec.onstop=async()=>{
-    if(!wakeActive)return;
-    const blob=new Blob(wakeChunks,{type:wakeRec.mimeType||'audio/webm'});
-    wakeActive=false;
-    const secs=(blob.size/16000).toFixed(1);
-    add('⏺ '+blob.size+' bayt · '+secs+' sn','sys');
-    if(blob.size<1500){add('SES YAKALANMADI','sys');setState(null);wakeListen();return}
-    setState('thinking');status.textContent='ANALİZ';
-    const d=new FormData();
-    d.append('audio',blob,'cmd'+(blob.type.includes('mp4')?'.m4a':'.webm'));
-    try{
-      const r=await fetch('/api/ask',{method:'POST',body:d});
-      const j=await r.json();
-      if(j.error){add('HATA: '+j.error,'sys')}
-      else{
-        add(j.text,'you');
-        const b=document.createElement('div');b.className='msg jar';b.textContent=j.reply;
-        log.appendChild(b);log.scrollTop=log.scrollHeight;
-        speakReply(j.reply,j.audio);
-      }
-    }catch(e){add('BAĞLANTI HATASI','sys')}
-    busy=false;setState(null);
-    wakeListen();
-  };
-  try{wakeRec.start(250);}catch(e){}
-  // 12 sn komut bekle, sonra uykuya don
-  wakeCmdTimer=setTimeout(()=>{
-    if(wakeActive){
-      wakeActive=false;
-      try{if(wakeRec.state!=='inactive')wakeRec.stop()}catch(e){}
-      setState(null);wakeListen();
-    }
-  },12000);
-}
-
-function stopWakeMode(){
-  wakeMode=false;wakeListening=false;wakeActive=false;
-  clearTimeout(wakeTimer);clearTimeout(wakeCmdTimer);
-  if(wakeRec){try{if(wakeRec.state!=='inactive')wakeRec.stop()}catch(e){}}
-  if(wakeStream){wakeStream.getTracks().forEach(t=>t.stop());wakeStream=null}
-  $('rec').classList.remove('on');
-  setState(null);
-  add('⏸ Uyandırma modu kapatıldı','sys');
-}
-
 // ── MİKROFON (bas-konuş, mevcut yöntem) ────────────────────────
 async function toggleRec(){
   if(recStream){stopRec();return}
-  if(wakeMode){stopWakeMode();return}
+  // Uyandirma modu jarvis_voice.js tarafindan yonetiliyor.
+  // Bas-konus burada; wake modu JARVIS butonunda.
+  if(wake.on){stopWakeMode();return}
   try{
     // ONCE mikrofon akisini al, SONRA MediaRecorder kur.
     // MediaRecorder() stream'siz kurulunca InvalidStateError verir ve
@@ -465,5 +353,6 @@ fetch('/api/health').then(r=>r.json()).then(j=>{
   status.textContent='SİSTEM HAZIR';
 }).catch(()=>{$('m1').textContent='BAĞLANTI YOK';$('m1').className='err'});
 </script>
+<script src="/static/jarvis_voice.js"></script>
 </body>
 </html>
