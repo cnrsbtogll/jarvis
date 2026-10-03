@@ -130,6 +130,39 @@ async def health():
     }
 
 
+@app.post("/api/wake")
+async def wake(audio: UploadFile = File(...)):
+    """Uyandırma kelimesi kontrolü — komutu çözümlemek için pahalı model kullanma."""
+    data = await audio.read()
+    if len(data) < 500:
+        return {"wake": False, "text": ""}
+
+    segments, _info = await asyncio.get_running_loop().run_in_executor(
+        None,
+        functools.partial(
+            lambda d: get_whisper().transcribe(
+                d,
+                language="tr",
+                beam_size=1,
+                vad_filter=True,
+                vad_parameters={"threshold": 0.2, "min_silence_duration_ms": 200},
+                condition_on_previous_text=False,
+                temperature=0.0,
+            ),
+            io.BytesIO(data),
+        ),
+    )
+    text = " ".join(s.text.strip() for s in segments).strip().lower()
+
+    # Whisper "jarvis"i "yarvis"/"carvis"/"jarvis" gibi yazabiliyor.
+    # Bu yuzden_once kabuk harfi eslesmesi, sonra normalize harf eslesmesi.
+    hit = any(
+        k in text
+        for k in ("jarvis", "yarvis", "jarves", "jarwitz", "jarwıs", "charvis", "carvis", "javıs")
+    )
+    return {"wake": hit, "text": text}
+
+
 @app.post("/api/ask")
 async def ask(audio: UploadFile = File(...)):
     """Ses al → Whisper ile metne çevir → LLM → TTS → sesli cevap."""
