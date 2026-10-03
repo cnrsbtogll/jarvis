@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>J.A.R.V.I.S.</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{
+  --cy:#00f0ff; --cy-dim:#0a8a99; --am:#ffb000; --am-dim:#8a5f00;
+  --bg:#02060a; --ok:#00ff9d; --err:#ff3b5c;
+}
+body{background:var(--bg);color:var(--cy);font-family:'Share Tech Mono',monospace;
+  min-height:100dvh;overflow:hidden;position:relative}
+
+/* CRT tarama çizgileri */
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:100;
+  background:repeating-linear-gradient(0deg,rgba(0,240,255,.035) 0 1px,transparent 1px 3px)}
+
+/* tarama çubuğu */
+.scan{position:fixed;left:0;right:0;height:2px;z-index:99;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--cy),transparent);
+  opacity:.35;animation:scan 7s linear infinite}
+@keyframes scan{0%{top:-2px}100%{top:100vh}}
+
+/* ızgara zemin */
+.grid{position:fixed;inset:0;z-index:0;opacity:.14;perspective:400px;
+  background-image:linear-gradient(rgba(0,240,255,.5) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,240,255,.5) 1px,transparent 1px);
+  background-size:44px 44px;transform:rotateX(58deg) translateY(28%);
+  transform-origin:bottom center;animation:gridmove 9s linear infinite}
+@keyframes gridmove{0%{background-position:0 0}100%{background-position:0 44px}}
+
+.wrap{position:relative;z-index:10;min-height:100dvh;display:flex;flex-direction:column;
+  padding:14px 14px calc(14px + env(safe-area-inset-bottom))}
+
+/* üst bar */
+.bar{display:flex;justify-content:space-between;align-items:center;
+  border-bottom:1px solid var(--cy-dim);padding-bottom:8px;font-size:11px;letter-spacing:2px}
+.bar b{font-family:'Orbitron',sans-serif;letter-spacing:4px;font-weight:700}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 9px var(--ok);animation:blip 1.4s infinite}
+@keyframes blip{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* reactor */
+.reactor{height:min(31vh,215px);display:grid;place-items:center;position:relative;flex-shrink:0}
+.ring{position:absolute;border:1px solid var(--cy);border-radius:50%;opacity:.5}
+.r1{width:118px;height:118px;border-style:dashed;animation:spin 14s linear infinite}
+.r2{width:158px;height:158px;border-width:2px;border-color:var(--cy-dim);
+  border-left-color:transparent;border-bottom-color:transparent;animation:spin 9s linear infinite reverse}
+.r3{width:198px;height:198px;border-style:dotted;opacity:.3;animation:spin 22s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.core{width:76px;height:76px;border-radius:50%;display:grid;place-items:center;
+  font-family:'Orbitron',sans-serif;font-weight:900;font-size:19px;
+  background:radial-gradient(circle,rgba(0,240,255,.32),transparent 70%);
+  border:2px solid var(--cy);box-shadow:0 0 26px rgba(0,240,255,.5),inset 0 0 22px rgba(0,240,255,.28);
+  transition:.28s;position:relative;z-index:2}
+.core.listening{animation:corepulse 1.05s ease-in-out infinite}
+.core.thinking{animation:corethink .55s linear infinite;border-color:var(--am);
+  box-shadow:0 0 26px rgba(255,176,0,.55),inset 0 0 22px rgba(255,176,0,.3);color:var(--am)}
+.core.speaking{border-color:var(--ok);box-shadow:0 0 34px rgba(0,255,157,.6),inset 0 0 26px rgba(0,255,157,.35)}
+@keyframes corepulse{0%,100%{transform:scale(1);box-shadow:0 0 26px rgba(0,240,255,.5)}
+  50%{transform:scale(1.16);box-shadow:0 0 52px rgba(0,240,255,.85)}}
+@keyframes corethink{0%,100%{transform:scale(1)}50%{transform:scale(.9)}}
+
+/* durum yazısı */
+.status{text-align:center;font-size:11px;letter-spacing:3px;min-height:16px;
+  color:var(--cy);text-shadow:0 0 9px rgba(0,240,255,.65);margin-top:6px}
+
+/* konuşma balonları */
+.log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:9px;
+  padding:12px 2px;scrollbar-width:thin;scrollbar-color:var(--cy-dim) transparent}
+.msg{max-width:87%;padding:9px 12px;font-size:14px;line-height:1.45;
+  border:1px solid var(--cy-dim);animation:fade .3s;position:relative}
+.msg.you{align-self:flex-end;border-color:var(--am-dim);color:var(--am);
+  border-right:3px solid var(--am);border-radius:10px 2px 2px 10px}
+.msg.jar{align-self:flex-start;border-color:var(--cy-dim);color:var(--cy);
+  border-left:3px solid var(--cy);border-radius:2px 10px 10px 2px;
+  background:rgba(0,240,255,.045)}
+.msg.jar::before{content:'JARVIS';position:absolute;top:-9px;left:9px;background:var(--bg);
+  padding:0 5px;font-size:8px;letter-spacing:2px;color:var(--cy-dim)}
+.msg.you::before{content:'SEN';position:absolute;top:-9px;right:9px;background:var(--bg);
+  padding:0 5px;font-size:8px;letter-spacing:2px;color:var(--am-dim)}
+.msg.sys{align-self:center;font-size:11px;color:var(--cy-dim);border:none;
+  letter-spacing:1px;opacity:.8;text-align:center}
+@keyframes fade{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+
+/* yazma satırı */
+.compose{display:flex;gap:8px;border-top:1px solid var(--cy-dim);padding-top:10px}
+.compose input{flex:1;background:rgba(0,240,255,.06);border:1px solid var(--cy-dim);
+  color:var(--cy);padding:11px 13px;font-family:'Share Tech Mono',monospace;font-size:14px;
+  outline:none;letter-spacing:.5px}
+.compose input:focus{border-color:var(--cy);box-shadow:0 0 13px rgba(0,240,255,.3)}
+.compose input::placeholder{color:var(--cy-dim);opacity:.7}
+
+.btn{border:1px solid var(--cy);background:rgba(0,240,255,.1);color:var(--cy);
+  padding:0 15px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:1.5px;
+  cursor:pointer;transition:.18s;min-width:52px;font-weight:700}
+.btn:hover{background:var(--cy);color:var(--bg);box-shadow:0 0 17px rgba(0,240,255,.65)}
+.btn:active{transform:scale(.94)}
+.btn.rec{width:56px;height:46px;border-radius:50%;border-color:var(--err);color:var(--err);
+  background:rgba(255,59,92,.1);font-size:19px;padding:0}
+.btn.rec.on{background:var(--err);color:#fff;animation:recpulse .95s infinite}
+@keyframes recpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,.65)}70%{box-shadow:0 0 0 17px rgba(255,59,92,0)}}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+
+/* alt bilgi */
+.foot{display:flex;justify-content:space-between;font-size:9px;letter-spacing:1.5px;
+  color:var(--cy-dim);padding-top:8px;opacity:.65}
+.err{color:var(--err)!important}
+@media(max-width:400px){.r3{width:168px;height:168px}.msg{font-size:13px}}
+</style>
+</head>
+<body>
+<div class="scan"></div><div class="grid"></div>
+
+<div class="wrap">
+  <div class="bar">
+    <b>J.A.R.V.I.S</b>
+    <span style="display:flex;align-items:center;gap:6px"><i class="pulse"></i><span id="st">ÇEVRİMİÇİ</span></span>
+  </div>
+
+  <div class="reactor">
+    <div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+    <div class="core" id="core">AI</div>
+  </div>
+  <div class="status" id="status">SİSTEM HAZIR</div>
+
+  <div class="log" id="log">
+    <div class="msg sys">SİSTEM AÇILIYOR · WHISPER + OMNIROUTE + EDGE-TTS</div>
+  </div>
+
+  <div class="compose">
+    <input id="q" placeholder="Bir şey yaz ya da mikrofona konuş..." autocomplete="off">
+    <button class="btn" id="send">GÖNDER</button>
+    <button class="btn rec" id="rec" title="Mikrofon">●</button>
+  </div>
+
+  <div class="foot">
+    <span id="m1">—</span><span>JARVIS v1.0</span><span id="m2">—</span>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=$('log'),core=$('core'),status=$('status'),st=$('st');
+let busy=false,media=null,recStream=null,recChunks=[],recTimer=null;
+
+function add(txt,who){
+  const d=document.createElement('div');
+  d.className='msg '+(who==='you'?'you':who==='sys'?'sys':'jar');
+  d.textContent=txt;
+  log.appendChild(d);
+  log.scrollTop=log.scrollHeight;
+  if(who!=='sys') speak(txt);
+  return d;
+}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+function setState(mode){
+  core.className='core';
+  if(mode)core.classList.add(mode);
+  const map={
+    listening:['DİNLEMEDE','#00ff9d'],
+    thinking:['İŞLENİYOR','#ffb000'],
+    speaking:['KONUŞUYOR','#00ff9d']
+  };
+  if(map[mode]){st.textContent=map[mode][0];st.style.color=map[mode][1];status.textContent=map[mode][0]}
+  else{st.textContent='ÇEVRİMİÇİ';st.style.color='';status.textContent='SİSTEM HAZIR'}
+}
+
+// Cevabı sesli oku (tarayici TTS - sunucu TTS'i de geliyor, bunu yedek olarak kullan)
+let voices=[];
+function loadVoices(){
+  voices=speechSynthesis.getVoices();
+  const tr=voices.find(v=>/tr[-_]?TR/i.test(v.lang));
+  $('m2').textContent=tr?tr.lang.slice(0,2).toUpperCase():'EN';
+}
+if('speechSynthesis'in window){
+  loadVoices();speechSynthesis.onvoiceschanged=loadVoices;
+}
+function speak(txt){
+  if(!('speechSynthesis'in window)||!voices.length)return;
+  try{
+    speechSynthesis.cancel();
+    const tr=voices.find(v=>/tr[-_]?TR/i.test(v.lang))||voices[0];
+    const u=new SpeechSynthesisUtterance(txt);
+    u.voice=tr;u.lang=tr.lang;u.rate=1.02;u.pitch=.82;u.volume=.92;
+    u.onstart=()=>setState('speaking');
+    u.onend=()=>{if(!busy)setState(null)};
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+// Sunucudan gelen MP3'u caldir (asil robotik ses)
+function playB64(b64){
+  if(!b64)return;
+  try{
+    speechSynthesis.cancel();
+    const bin=atob(b64),arr=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+    const url=URL.createObjectURL(new Blob([arr],{type:'audio/mpeg'}));
+    const a=new Audio(url);
+    a.onplay=()=>setState('speaking');
+    a.onended=()=>{URL.revokeObjectURL(url);if(!busy)setState(null)};
+    a.onerror=()=>URL.revokeObjectURL(url);
+    a.play().catch(()=>{});
+  }catch(e){}
+}
+
+async function ask(text){
+  if(busy||!text.trim())return;
+  busy=true;$('q').value='';add(text,'you');setState('thinking');
+  try{
+    const fd=new FormData();fd.append('q',text);
+    const r=await fetch('/api/text',{method:'POST',body:fd});
+    const j=await r.json();
+    if(j.error){add('HATA: '+j.error,'sys')}
+    else{const b=document.createElement('div');b.className='msg jar';b.textContent=j.reply;
+      log.appendChild(b);log.scrollTop=log.scrollHeight;playB64(j.audio)||speak(j.reply)}
+  }catch(e){add('BAĞLANTI HATASI','sys')}
+  busy=false;
+  if(recStream)return;setState(null);
+}
+
+$('send').onclick=()=>ask($('q').value);
+$('q').addEventListener('keydown',e=>{if(e.key==='Enter')ask($('q').value)});
+
+// ── MİKROFON ────────────────────────────────────────────────
+async function toggleRec(){
+  if(recStream){stopRec();return}
+  try{
+    media=new (window.MediaRecorder||window.webkitMediaRecorder)();
+    const s=await navigator.mediaDevices.getUserMedia({audio:true});
+    recStream=s;recChunks=[];
+    media.ondataavailable=e=>{if(e.data.size)recChunks.push(e.data)};
+    media.start();
+    $('rec').classList.add('on');
+    setState('listening');status.textContent='DİNLEME — KONUŞ';
+    // 10 sn sonra otomatik dur
+    recTimer=setTimeout(()=>{if(recStream)stopRec()},10000);
+  }catch(e){
+    add('MİKROFON ERİŞİMİ REDDEDİLDİ','sys');
+    setState(null);
+  }
+}
+
+async function stopRec(){
+  if(!recStream)return;
+  clearTimeout(recTimer);
+  media.onstop=async()=>{
+    recStream.getTracks().forEach(t=>t.stop());
+    recStream=null;
+    $('rec').classList.remove('on');
+    const blob=new Blob(recChunks,{type:'audio/webm'});
+    if(blob.size<1500){setState(null);add('SES YAKALANAMADI','sys');return}
+    setState('thinking');status.textContent='ANALİZ';
+    const fd=new FormData();
+    fd.append('audio',blob,'rec.webm');
+    try{
+      const r=await fetch('/api/ask',{method:'POST',body:fd});
+      const j=await r.json();
+      if(j.error){add('HATA: '+j.error,'sys')}
+      else{
+        add(j.text,'you');
+        const b=document.createElement('div');b.className='msg jar';b.textContent=j.reply;
+        log.appendChild(b);log.scrollTop=log.scrollHeight;
+        playB64(j.audio)||speak(j.reply);
+      }
+    }catch(e){add('BAĞLANTI HATASI','sys')}
+    busy=false;setState(null);
+  };
+  media.stop();
+}
+$('rec').onclick=toggleRec;
+
+// sag tik ile mod degistir
+$('log').addEventListener('click',e=>{
+  const b=e.target.closest('.msg.jar');if(!b)return;
+  speak(b.textContent);
+});
+
+// health
+fetch('/api/health').then(r=>r.json()).then(j=>{
+  $('m1').textContent='MODEL '+j.model;
+  status.textContent='SİSTEM HAZIR';
+}).catch(()=>{$('m1').textContent='BAĞLANTI YOK';$('m1').className='err'});
+</script>
+</body>
+</html>

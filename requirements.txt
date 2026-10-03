@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+faster-whisper
+edge-tts
+python-multipart
