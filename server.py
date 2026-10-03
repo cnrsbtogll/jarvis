@@ -132,12 +132,18 @@ async def health():
 async def ask(audio: UploadFile = File(...)):
     """Ses al → Whisper ile metne çevir → LLM → TTS → sesli cevap."""
     AUDIO_TMP.mkdir(parents=True, exist_ok=True)
-    tmp_in = AUDIO_TMP / f"in_{audio.filename or 'rec.webm'}"
     tmp_out = AUDIO_TMP / "out.mp3"
 
     data = await audio.read()
     if len(data) < 1000:
         return JSONResponse({"error": "Ses dosyası boş veya çok kısa"}, status_code=400)
+
+    # Tarayici formatini koru (ffmpeg uzantidan okur):
+    # webm/opus, mp4/m4a (Safari), ogg/opus
+    name = audio.filename or "rec.webm"
+    if not name.endswith((".webm", ".m4a", ".mp4", ".ogg", ".opus", ".wav")):
+        name = "rec.webm"
+    tmp_in = AUDIO_TMP / name
     tmp_in.write_bytes(data)
 
     # 1) Whisper — once dosyayi 16k mono WAV'a cevir (webm/opus dogrudan okunamayabiliyor)

@@ -232,17 +232,37 @@ $('q').addEventListener('keydown',e=>{if(e.key==='Enter')ask($('q').value)});
 async function toggleRec(){
   if(recStream){stopRec();return}
   try{
-    media=new (window.MediaRecorder||window.webkitMediaRecorder)();
-    const s=await navigator.mediaDevices.getUserMedia({audio:true});
+    // ONCE mikrofon akisini al, SONRA MediaRecorder kur.
+    // MediaRecorder() stream'siz kurulunca InvalidStateError verir ve
+    // catch blogu yanlis sekilde "Mikrofon erisimi reddedildi" gosterir.
+    const s=await navigator.mediaDevices.getUserMedia({
+      audio:{
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      }
+    });
+
+    const Recorder=window.MediaRecorder||window.webkitMediaRecorder;
+    if(!Recorder)throw new Error('MediaRecorder desteklenmiyor');
+
+    // Tarayici destekli en iyi ses formatini sec (opus/webm tercih edilir)
+    const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus']
+      .find(t=>Recorder.isTypeSupported&&Recorder.isTypeSupported(t));
+
+    media=mime?new Recorder(s,{mimeType:mime}):new Recorder(s);
+
     recStream=s;recChunks=[];
-    media.ondataavailable=e=>{if(e.data.size)recChunks.push(e.data)};
+    media.ondataavailable=e=>{if(e.data&&e.data.size>0)recChunks.push(e.data)};
+    media.onerror=e=>add('KAYIT HATASI: '+(e.error||e.type||'bilinmiyor'),'sys');
     media.start();
     $('rec').classList.add('on');
     setState('listening');status.textContent='DİNLEME — KONUŞ';
     // 10 sn sonra otomatik dur
     recTimer=setTimeout(()=>{if(recStream)stopRec()},10000);
   }catch(e){
-    add('MİKROFON ERİŞİMİ REDDEDİLDİ','sys');
+    console.error('mic error:',e);
+    add('MİKROFON HATASI: '+e.message,'sys');
     setState(null);
   }
 }
@@ -250,15 +270,17 @@ async function toggleRec(){
 async function stopRec(){
   if(!recStream)return;
   clearTimeout(recTimer);
+  const stream=recStream, chunks=recChunks, recorder=media;
   media.onstop=async()=>{
-    recStream.getTracks().forEach(t=>t.stop());
+    stream.getTracks().forEach(t=>t.stop());
     recStream=null;
     $('rec').classList.remove('on');
-    const blob=new Blob(recChunks,{type:'audio/webm'});
-    if(blob.size<1500){setState(null);add('SES YAKALANAMADI','sys');return}
+    const type=(recorder&&recorder.mimeType)||'audio/webm';
+    const blob=new Blob(chunks,{type});
+    if(blob.size<1500){setState(null);add('SES YAKALANAMADI ('+chunks.length+' parça, '+blob.size+' bayt)','sys');return}
     setState('thinking');status.textContent='ANALİZ';
     const fd=new FormData();
-    fd.append('audio',blob,'rec.webm');
+    fd.append('audio',blob,'rec'+(blob.type.includes('mp4')?'.m4a':blob.type.includes('ogg')?'.ogg':'.webm'));
     try{
       const r=await fetch('/api/ask',{method:'POST',body:fd});
       const j=await r.json();
