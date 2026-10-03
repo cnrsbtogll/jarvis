@@ -154,7 +154,8 @@ function add(txt,who){
   d.textContent=txt;
   log.appendChild(d);
   log.scrollTop=log.scrollHeight;
-  if(who!=='sys') speak(txt);
+  // Ses burada calinmaz. Cevabi playB64() oynatir (sunucu MP3'u).
+  // Burada speak() cagrisi ikinci sesi baslatiyordu.
   return d;
 }
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -181,6 +182,20 @@ function loadVoices(){
 if('speechSynthesis'in window){
   loadVoices();speechSynthesis.onvoiceschanged=loadVoices;
 }
+// ── SES: TEK KAYNAK ────────────────────────────────────────────
+// Oncelik sunucu MP3'u (robotik Ahmet sesi). Tarayici TTS'i sadece
+// MP3 gelmezse yedek. Iki motor ASLA ayni anda calismaz.
+let currentAudio=null;
+
+function stopAudio(){
+  if(currentAudio){
+    try{currentAudio.pause();currentAudio.currentTime=0}catch(e){}
+    currentAudio=null;
+  }
+  try{speechSynthesis.cancel()}catch(e){}
+}
+
+// Tarayici TTS'i (yedek)
 function speak(txt){
   if(!('speechSynthesis'in window)||!voices.length)return;
   try{
@@ -194,20 +209,30 @@ function speak(txt){
   }catch(e){}
 }
 
-// Sunucudan gelen MP3'u caldir (asil robotik ses)
+// Sunucudan gelen MP3 (asil ses)
 function playB64(b64){
-  if(!b64)return;
+  if(!b64)return false;
+  stopAudio();
   try{
-    speechSynthesis.cancel();
     const bin=atob(b64),arr=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
     const url=URL.createObjectURL(new Blob([arr],{type:'audio/mpeg'}));
     const a=new Audio(url);
+    currentAudio=a;
     a.onplay=()=>setState('speaking');
-    a.onended=()=>{URL.revokeObjectURL(url);if(!busy)setState(null)};
-    a.onerror=()=>URL.revokeObjectURL(url);
-    a.play().catch(()=>{});
-  }catch(e){}
+    a.onended=()=>{URL.revokeObjectURL(url);currentAudio=null;if(!busy)setState(null)};
+    a.onerror=()=>{URL.revokeObjectURL(url);currentAudio=null;speak(lastReplyText)};
+    a.play().catch(()=>{speak(lastReplyText)});
+    return true;
+  }catch(e){return false}
+}
+
+// Cevabi seslendir: MP3 varsa onu, yoksa tarayici TTS'ini
+let lastReplyText='';
+function speakReply(txt,b64){
+  lastReplyText=txt||'';
+  stopAudio();
+  if(b64){playB64(b64)}else{speak(lastReplyText)}
 }
 
 async function ask(text){
@@ -219,7 +244,7 @@ async function ask(text){
     const j=await r.json();
     if(j.error){add('HATA: '+j.error,'sys')}
     else{const b=document.createElement('div');b.className='msg jar';b.textContent=j.reply;
-      log.appendChild(b);log.scrollTop=log.scrollHeight;playB64(j.audio)||speak(j.reply)}
+      log.appendChild(b);log.scrollTop=log.scrollHeight;speakReply(j.reply,j.audio)}
   }catch(e){add('BAĞLANTI HATASI','sys')}
   busy=false;
   if(recStream)return;setState(null);
@@ -295,7 +320,7 @@ async function stopRec(){
         add(j.text,'you');
         const b=document.createElement('div');b.className='msg jar';b.textContent=j.reply;
         log.appendChild(b);log.scrollTop=log.scrollHeight;
-        playB64(j.audio)||speak(j.reply);
+        speakReply(j.reply,j.audio);
       }
     }catch(e){add('BAĞLANTI HATASI','sys')}
     busy=false;setState(null);
@@ -307,6 +332,8 @@ $('rec').onclick=toggleRec;
 // sag tik ile mod degistir
 $('log').addEventListener('click',e=>{
   const b=e.target.closest('.msg.jar');if(!b)return;
+  // Tekrar dinle: yalnizca tarayici TTS'i (MP3 zaten bitti)
+  stopAudio();
   speak(b.textContent);
 });
 
